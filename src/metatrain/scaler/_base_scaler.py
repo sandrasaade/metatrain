@@ -897,14 +897,18 @@ class BaseScaler(torch.nn.Module):
         self,
         node_target_name: str,
         edge_target_name: str,
+        mean: str = "geometric",
     ) -> None:
         """
         Computes the per-target scales of an atom-pair (edge) target from the per-target
         scales of the corresponding per-atom (node) target.
 
         For each pair of atomic types (Z_I, Z_J), the per-target scale of the edge
-        target is set to the geometric mean of the per-target scales of the node target
-        for Z_I and Z_J.
+        target is set to a mean of the per-target scales of the node target for Z_I
+        and Z_J: ``sqrt(s_I * s_J)`` for ``mean="geometric"``, or
+        ``(s_I + s_J) / 2`` for ``mean="arithmetic"``. The geometric mean is the
+        AM-GM lower bound, so it yields smaller proxy scales and therefore a higher
+        relative weight on the edge target in the loss.
 
         Only per-target scales are computed for edge targets; per-property scales for
         atom-pair targets stay at their identity default (1.0) - see
@@ -914,7 +918,12 @@ class BaseScaler(torch.nn.Module):
 
         :param node_target_name: Name of the per-atom (node) target.
         :param edge_target_name: Name of the atom-pair (edge) target.
+        :param mean: Aggregation for the proxy, ``"geometric"`` or ``"arithmetic"``.
         """
+        if mean not in ("geometric", "arithmetic"):
+            raise ValueError(
+                f"offsite_proxy_mean must be 'geometric' or 'arithmetic', got '{mean}'"
+            )
         if node_target_name not in self.target_names:
             raise ValueError(f"Node target '{node_target_name}' not found in scaler.")
         if edge_target_name not in self.target_names:
@@ -961,7 +970,10 @@ class BaseScaler(torch.nn.Module):
 
                 s_I = type_scale[first_index]
                 s_J = type_scale[second_index]
-                new_vals[row_idx, :] = torch.sqrt(s_I.abs() * s_J.abs())
+                if mean == "geometric":
+                    new_vals[row_idx, :] = torch.sqrt(s_I.abs() * s_J.abs())
+                else:
+                    new_vals[row_idx, :] = (s_I.abs() + s_J.abs()) / 2
 
             new_blocks.append(
                 TensorBlock(

@@ -2705,3 +2705,127 @@ def test_scaler_atom_pair_fixed_weights_raises(weights):
             is_distributed=False,
             fixed_weights={target_name: weights},
         )
+
+
+def _node_edge_dataset_info(atomic_types):
+    """DatasetInfo with a matching node/edge atomic-basis target pair."""
+    node_name = "mtt::matrix_nodes::ham"
+    edge_name = "mtt::matrix_edges::ham"
+    spec = {
+        "quantity": "",
+        "unit": "",
+        "type": {"spherical": {"irreps": [{"o3_lambda": 0, "o3_sigma": 1}]}},
+        "num_subtargets": 1,
+    }
+    return (
+        node_name,
+        edge_name,
+        DatasetInfo(
+            length_unit="angstrom",
+            atomic_types=atomic_types,
+            targets={
+                node_name: get_generic_target_info(
+                    node_name, {**spec, "sample_kind": "atom"}
+                ),
+                edge_name: get_generic_target_info(
+                    edge_name, {**spec, "sample_kind": "atom_pair"}
+                ),
+            },
+        ),
+    )
+
+
+def _fitted_scaler_with_node_scales(scale_by_type):
+    """A fitted scaler whose node per-target scales are set to known values."""
+    node_name, edge_name, dataset_info = _node_edge_dataset_info(
+        sorted(scale_by_type)
+    )
+    scaler = Scaler(
+        hypers={"use_onsite_scales_for_offsite": True}, dataset_info=dataset_info
+    )
+    scaler.model.fit(targets_to_fit=[node_name, edge_name])
+
+    per_target = scaler.model.per_target_scales[node_name]
+    blocks = []
+    for key in per_target.keys:
+        block = per_target.block(key)
+        values = block.values.clone()
+        for row, atomic_type in enumerate(scaler.model.atomic_types.tolist()):
+            values[row, :] = scale_by_type[atomic_type]
+        blocks.append(
+            TensorBlock(
+                values=values,
+                samples=block.samples,
+                components=block.components,
+                properties=block.properties,
+            )
+        )
+    scaler.model.per_target_scales[node_name] = TensorMap(per_target.keys, blocks)
+    return scaler, node_name, edge_name
+
+
+@pytest.mark.parametrize(
+    "mean, expected",
+    [("geometric", math.sqrt(4.0 * 9.0)), ("arithmetic", (4.0 + 9.0) / 2)],
+)
+def test_onsite_scales_for_offsite_mean(mean, expected):
+    """A mixed (Z_I, Z_J) pair gets the chosen mean of the two node scales."""
+    scaler, node_name, edge_name = _fitted_scaler_with_node_scales({1: 4.0, 6: 9.0})
+
+    scaler.model.apply_onsite_scales_for_offsite(node_name, edge_name, mean=mean)
+
+    block = scaler.model.per_target_scales[edge_name].block(0)
+    types = scaler.model.atomic_types.tolist()
+    n_mixed = 0
+    for row, (i, j) in enumerate(block.samples.values.tolist()):
+        if types[i] != types[j]:
+            n_mixed += 1
+            torch.testing.assert_close(
+                block.values[row, 0],
+                torch.tensor(expected, dtype=block.values.dtype),
+            )
+    assert n_mixed > 0
+
+
+def test_onsite_scales_for_offsite_same_type_is_the_node_scale():
+    """For a (Z, Z) pair both means reduce to the node scale itself."""
+    scale_by_type = {1: 4.0, 6: 9.0}
+    scaler, node_name, edge_name = _fitted_scaler_with_node_scales(scale_by_type)
+
+    scaler.model.apply_onsite_scales_for_offsite(node_name, edge_name)
+
+    block = scaler.model.per_target_scales[edge_name].block(0)
+    types = scaler.model.atomic_types.tolist()
+    n_same = 0
+    for row, (i, j) in enumerate(block.samples.values.tolist()):
+        if i == j:
+            n_same += 1
+            torch.testing.assert_close(
+                block.values[row, 0],
+                torch.tensor(scale_by_type[types[i]], dtype=block.values.dtype),
+            )
+    assert n_same > 0
+
+
+def test_onsite_scales_for_offsite_rejects_unknown_mean():
+    scaler, node_name, edge_name = _fitted_scaler_with_node_scales({1: 4.0, 6: 9.0})
+
+    with pytest.raises(ValueError, match="offsite_proxy_mean must be"):
+        scaler.model.apply_onsite_scales_for_offsite(
+            node_name, edge_name, mean="harmonic"
+        )
+
+
+def test_atom_pair_targets_skipped_unless_proxy_enabled():
+    """Edge targets only enter the scaler when the proxy is switched on."""
+    node_name, edge_name, dataset_info = _node_edge_dataset_info([1, 6])
+
+    off = Scaler(hypers={}, dataset_info=dataset_info)
+    assert node_name in off.model.target_names
+    assert edge_name not in off.model.target_names
+
+    on = Scaler(
+        hypers={"use_onsite_scales_for_offsite": True}, dataset_info=dataset_info
+    )
+    assert node_name in on.model.target_names
+    assert edge_name in on.model.target_names

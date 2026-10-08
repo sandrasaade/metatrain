@@ -60,11 +60,13 @@ class Scaler(ModelInterface[ModelHypers]):
         if self.densify_atomic_basis:
             dataset_info = densify_atomic_basis_dataset_info(dataset_info)
 
-        # Skip atom-pair targets
+        self.keep_atom_pair_targets = bool(
+            self.hypers.get("use_onsite_scales_for_offsite", False)
+        )
         self.target_infos = {
             target_name: target_info
             for target_name, target_info in dataset_info.targets.items()
-            if target_info.sample_kind != "atom_pair"
+            if self.keep_atom_pair_targets or target_info.sample_kind != "atom_pair"
         }
 
         # Initialize the scaler model
@@ -144,7 +146,10 @@ class Scaler(ModelInterface[ModelHypers]):
             target_name: dense_new_targets[target_name]
             for target_name in merged_info.targets
             if target_name not in self.dataset_info.targets
-            and dense_new_targets[target_name].sample_kind != "atom_pair"
+            and (
+                self.keep_atom_pair_targets
+                or dense_new_targets[target_name].sample_kind != "atom_pair"
+            )
         }
 
         self.dataset_info = merged_info

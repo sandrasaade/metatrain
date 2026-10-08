@@ -321,6 +321,42 @@ class Trainer(TrainerInterface[TrainerHypers]):
                     ).to(device),
                 )
 
+        if model.hypers.get("use_onsite_scales_for_offsite", False):
+            proxy_mean = model.hypers.get("offsite_proxy_mean", "geometric")
+            for edge_name in model.new_outputs:
+                if "::matrix_edges::" not in edge_name:
+                    continue
+                node_name = edge_name.replace("::matrix_edges::", "::matrix_nodes::")
+                if node_name not in model.model.target_names:
+                    continue
+                logging.info(
+                    f"Applying onsite-scale proxy ({proxy_mean} mean): "
+                    f"'{node_name}' -> '{edge_name}'"
+                )
+                model.model.apply_onsite_scales_for_offsite(
+                    node_name, edge_name, mean=proxy_mean
+                )
+            for target_name in model.model.scales.keys():
+                model.register_buffer(
+                    target_name + "_scaler_buffer",
+                    mts.save_buffer(
+                        mts.make_contiguous(
+                            model.model.scales[target_name].to("cpu", torch.float64)
+                        )
+                    ).to(device),
+                )
+            for target_name in model.model.per_target_scales.keys():
+                model.register_buffer(
+                    target_name + "_per_target_scaler_buffer",
+                    mts.save_buffer(
+                        mts.make_contiguous(
+                            model.model.per_target_scales[target_name].to(
+                                "cpu", torch.float64
+                            )
+                        )
+                    ).to(device),
+                )
+
         if checkpoint_dir and (not is_distributed or torch.distributed.get_rank() == 0):
             ckpt_path = Path(checkpoint_dir) / "scaler.ckpt"
             self.save_checkpoint(model, ckpt_path)
