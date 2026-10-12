@@ -244,10 +244,12 @@ class PET(ModelInterface[ModelHypers]):
 
         # scaler: this is also handled by the trainer at training time
         scaler_hypers = dict(get_default_hypers("scaler")["model"])
-        scaler_hypers["use_onsite_scales_for_offsite"] = self.hypers[
-            "use_onsite_scales_for_offsite"
-        ]
-        scaler_hypers["offsite_proxy_mean"] = self.hypers["offsite_proxy_mean"]
+        scaler_hypers["use_onsite_scales_for_offsite"] = self.hypers.get(
+            "use_onsite_scales_for_offsite", False
+        )
+        scaler_hypers["offsite_proxy_mean"] = self.hypers.get(
+            "offsite_proxy_mean", "geometric"
+        )
         self.scaler = Scaler(hypers=scaler_hypers, dataset_info=dataset_info)
 
         self.single_label = Labels.single()

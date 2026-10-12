@@ -146,22 +146,26 @@ class Trainer(TrainerInterface[TrainerHypers]):
                 # Scaler.__init__), so incoming batches of (possibly sparse,
                 # atom_type-keyed) atomic-basis targets need to be densified the same
                 # way every other architecture densifies its own targets before
-                # training. Restricted to `model.target_infos`' keys (atom-pair
-                # targets are excluded there, see `Scaler.__init__`: padding them
-                # would require a neighbor list the scaler has no way to request, and
-                # their scales are never actually fit from this data anyway, see
-                # `BaseScaler.accumulate`) - but using the *layouts* from
+                # training. Atom-pair targets are skipped: padding them would
+                # require a neighbor list the scaler has no way to request, and their
+                # scales are never fit from this data anyway (see
+                # `BaseScaler.accumulate`). They can still be present in
+                # `model.target_infos` when the onsite-scale proxy is enabled, which
+                # sets them from the node scales - but using the *layouts* from
                 # `model.dataset_info.targets`, not `model.target_infos`: the latter
                 # are already densified (atom_type keys moved to samples, see
                 # `Scaler.__init__`), whereas the densify transform below needs a
                 # layout matching the raw, not-yet-densified incoming batch data
                 # (atom_type still a key dimension).
+                transform_targets = {}
+                for k, v in model.dataset_info.targets.items():
+                    if k not in model.target_infos:
+                        continue
+                    if v.sample_kind == "atom_pair":
+                        continue
+                    transform_targets[k] = v
                 atomic_basis_transform, _ = get_prepare_atomic_basis_targets_transform(
-                    {
-                        k: v
-                        for k, v in model.dataset_info.targets.items()
-                        if k in model.target_infos
-                    },
+                    transform_targets,
                     model.dataset_info.extra_data,
                 )
 
