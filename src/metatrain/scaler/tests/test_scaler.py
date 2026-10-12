@@ -2829,3 +2829,114 @@ def test_atom_pair_targets_skipped_unless_proxy_enabled():
     )
     assert node_name in on.model.target_names
     assert edge_name in on.model.target_names
+
+
+def _uncoupled_scale_maps(scaler, node_name, edge_name, node_scale_by_index):
+    """Rewrite a fitted scaler's scale maps to the real uncoupled Hamiltonian layout.
+
+    Node and edge targets both carry the keys
+    ``["o3_lambda_1", "o3_lambda_2", "o3_sigma_1", "o3_sigma_2"]``; atom types live
+    in the sample labels as positional indices.
+    """
+    key_names = ["o3_lambda_1", "o3_lambda_2", "o3_sigma_1", "o3_sigma_2"]
+    key_vals = [[a, b, 1, 1] for a in range(3) for b in range(3)]
+    keys = Labels(key_names, torch.tensor(key_vals, dtype=torch.int32))
+    n_types = len(scaler.model.atomic_types)
+    n_props = 4
+
+    node_samples = Labels(
+        ["atomic_type"], torch.arange(n_types, dtype=torch.int32).reshape(-1, 1)
+    )
+    pair_idx = [[i, j] for i in range(n_types) for j in range(n_types)]
+    edge_samples = Labels(
+        ["first_atomic_type", "second_atomic_type"],
+        torch.tensor(pair_idx, dtype=torch.int32),
+    )
+    props = Labels(["p"], torch.arange(n_props, dtype=torch.int32).reshape(-1, 1))
+
+    node_blocks, edge_pt_blocks, edge_pp_blocks, edge_full_blocks = [], [], [], []
+    for key in key_vals:
+        lam_1, lam_2 = key[0], key[1]
+        node_vals = torch.zeros(n_types, n_props, dtype=torch.float64)
+        for i in range(n_types):
+            node_vals[i, :] = node_scale_by_index[i] * (1.0 + lam_1 + lam_2)
+        node_blocks.append(
+            TensorBlock(
+                values=node_vals, samples=node_samples, components=[], properties=props
+            )
+        )
+        edge_pt_blocks.append(
+            TensorBlock(
+                values=torch.ones(len(pair_idx), n_props, dtype=torch.float64),
+                samples=edge_samples,
+                components=[],
+                properties=props,
+            )
+        )
+        for sink in (edge_pp_blocks, edge_full_blocks):
+            sink.append(
+                TensorBlock(
+                    values=torch.ones(len(pair_idx), n_props, dtype=torch.float64),
+                    samples=edge_samples,
+                    components=[],
+                    properties=props,
+                )
+            )
+
+    scaler.model.per_target_scales[node_name] = TensorMap(keys, node_blocks)
+    scaler.model.per_target_scales[edge_name] = TensorMap(keys, edge_pt_blocks)
+    scaler.model.per_property_scales[edge_name] = TensorMap(keys, edge_pp_blocks)
+    scaler.model.scales[edge_name] = TensorMap(keys, edge_full_blocks)
+    return keys
+
+
+def test_onsite_scales_for_offsite_uncoupled_keys_are_matched():
+    """The real Hamiltonian layout: diagonal node blocks feed each edge block.
+
+    Regression test: a lookup that ignores the ``_1``/``_2`` physics keys finds no
+    node block at all and silently leaves every edge scale at 1.0.
+    """
+    scaler, node_name, edge_name = _fitted_scaler_with_node_scales({1: 4.0, 6: 9.0})
+    node_scale_by_index = {0: 4.0, 1: 9.0}
+    _uncoupled_scale_maps(scaler, node_name, edge_name, node_scale_by_index)
+
+    scaler.model.apply_onsite_scales_for_offsite(node_name, edge_name, mean="geometric")
+
+    edge_pt = scaler.model.per_target_scales[edge_name]
+    assert not torch.allclose(
+        edge_pt.block(0).values, torch.ones_like(edge_pt.block(0).values)
+    ), "edge scales were left at their identity default: the proxy did nothing"
+
+    for key in edge_pt.keys:
+        lam_1 = int(key["o3_lambda_1"])
+        lam_2 = int(key["o3_lambda_2"])
+        block = edge_pt.block(key)
+        # Z_I comes from the (lam_1, lam_1) node block, Z_J from (lam_2, lam_2)
+        factor_i = 1.0 + 2 * lam_1
+        factor_j = 1.0 + 2 * lam_2
+        for row, (i, j) in enumerate(block.samples.values.tolist()):
+            expected = math.sqrt(
+                node_scale_by_index[i] * factor_i * node_scale_by_index[j] * factor_j
+            )
+            torch.testing.assert_close(
+                block.values[row, 0],
+                torch.tensor(expected, dtype=block.values.dtype),
+            )
+
+
+def test_onsite_scales_for_offsite_raises_when_nothing_matches():
+    """A node/edge key mismatch is an error, not a silent no-op."""
+    scaler, node_name, edge_name = _fitted_scaler_with_node_scales({1: 4.0, 6: 9.0})
+    _uncoupled_scale_maps(scaler, node_name, edge_name, {0: 4.0, 1: 9.0})
+
+    node_pt = scaler.model.per_target_scales[node_name]
+    bogus = Labels(
+        ["n_1", "n_2", "l_1", "l_2"],
+        node_pt.keys.values,
+    )
+    scaler.model.per_target_scales[node_name] = TensorMap(
+        bogus, [node_pt.block(k).copy() for k in node_pt.keys]
+    )
+
+    with pytest.raises(ValueError, match="could not match any node block"):
+        scaler.model.apply_onsite_scales_for_offsite(node_name, edge_name)
